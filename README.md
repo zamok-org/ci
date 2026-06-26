@@ -2,7 +2,7 @@
 
 One reusable workflow that takes **any** macOS app from a git tag to a signed →
 notarized → **stapled** artifact, a published Homebrew cask, and (optionally) a Sparkle
-appcast. Each product repo carries a ~25-line caller instead of a ~90-line job.
+appcast. Each product repo carries a ~30-line caller instead of a ~90-line job.
 
 ## Two hosts, one pipeline
 
@@ -17,14 +17,15 @@ Same inputs, same secrets, same steps — pick the host that matches the product
 ## Quick start — onboard a product in 8 steps
 
 1. **Repo + org.** Public open-source app → GitHub. Set the signing secrets (below) on the
-   repo or its org so the reusable workflow can read them.
+   product's org (e.g. `bshk-app`) so `${{ secrets.* }}` resolves in the caller.
 2. **Cask metadata.** Add `Distribution/cask-<app>.json` (template below).
 3. **Entitlements** *(only if needed)*. Add `<App>.entitlements` if Hardened Runtime needs
    it (e.g. mic). Restricted entitlements also need a provisioning profile + the
    `PROVISION_PROFILE` secret + `provisioning-profile: true`.
 4. **Caller workflow.** Add `.github/workflows/release.yml` (copy below); fill `scheme`,
    `bundle-id`, `cask-metadata`, `asset-repo: <owner>/<app>`.
-5. **Secrets.** Set the canonical secrets (below) and keep `secrets: inherit`.
+5. **Secrets.** Map the canonical secrets explicitly in the caller (see ⚠️ below — cross-org
+   `inherit` does **not** forward them).
 6. **Sparkle** *(optional)*. Add Sparkle SPM + Info.plist + EdDSA key, set `sparkle: true`.
 7. **Release.** `git tag <app>-v0.1.0 && git push --tags`; watch the run under **Actions**.
 8. **Install.** `brew tap <owner>/homebrew-tap && brew install --cask <app>`.
@@ -51,8 +52,21 @@ jobs:
       # sparkle: true                        # in-app updates
       # runner: macos-15                     # override the runner (Xcode/SDK needs)
       version: ${{ github.event.inputs.version }}
-    secrets: inherit
+    secrets:                                 # map explicitly — see the cross-org note below
+      DEVELOPER_ID_P12:          ${{ secrets.DEVELOPER_ID_P12 }}
+      DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+      NOTARY_KEY_P8:             ${{ secrets.NOTARY_KEY_P8 }}
+      NOTARY_KEY_ID:             ${{ secrets.NOTARY_KEY_ID }}
+      NOTARY_ISSUER:             ${{ secrets.NOTARY_ISSUER }}
+      TAP_GITHUB_TOKEN:          ${{ secrets.TAP_GITHUB_TOKEN }}
 ```
+
+> **⚠️ Cross-org secrets — don't use `secrets: inherit` here.** This action lives in
+> `zamok-org`; when your product repo is in a *different* org (e.g. `bshk-app`), GitHub
+> only inherits secrets within the same org, so `inherit` forwards **nothing** and the run
+> fails in ~4 s with *"Secret … is required, but not provided"*. **Map each secret
+> explicitly** as above. (If your product repo is in `zamok-org` too, `inherit` works and you
+> may drop the explicit block.)
 
 Pin `@v1` (moving tag) or a SHA.
 
@@ -76,19 +90,19 @@ Pin `@v1` (moving tag) or a SHA.
 
 ## Secrets
 
-`secrets: inherit` passes them through from the caller (repo or org level).
+Set these on the **product's org** (so `${{ secrets.* }}` resolves in the caller), then
+**map them explicitly** in the caller (cross-org `inherit` doesn't forward — see above).
 
 | secret | required | for |
 |---|---|---|
 | `DEVELOPER_ID_P12` / `DEVELOPER_ID_P12_PASSWORD` | ✓ | Developer ID signing |
 | `NOTARY_KEY_P8` / `NOTARY_KEY_ID` / `NOTARY_ISSUER` | ✓ | `notarytool` (App Store Connect API key) |
-| `TAP_GITHUB_TOKEN` | ✓ | push the artifact + cask to the tap |
+| `TAP_GITHUB_TOKEN` | ✓ | push the artifact + cask to the tap (needs access to BOTH the tap and `asset-repo`) |
 | `PROVISION_PROFILE` | — | base64 `.provisionprofile` (restricted entitlements) |
 | `SPARKLE_ED_PRIVATE_KEY` | — | sign the appcast (EdDSA) |
 
 `DEVELOPER_ID_P12` is the base64 of an exported Developer ID Application `.p12`; the
-notary trio is an App Store Connect API key. Set them once on the product's org so every
-open-source app inherits them.
+notary trio is an App Store Connect API key.
 
 ## Per-app files
 
