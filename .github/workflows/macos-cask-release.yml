@@ -1,0 +1,127 @@
+name: macOS cask release (reusable)
+
+# Public GitHub Action twin of the private Gitea `zamok/ci` workflow. Takes any macOS app
+# from a tag to a signed -> notarized -> stapled artifact + a published Homebrew cask
+# (and optional Sparkle appcast). Open-source repos call it on GitHub-hosted macOS
+# runners (free for public repos); the Gitea twin runs the same steps on a self-hosted
+# Tart runner for private repos.
+#
+# Inputs are passed into `run:` blocks via `env:` (never interpolated directly into the
+# shell) to avoid command injection.
+
+on:
+  workflow_call:
+    inputs:
+      scheme:        { type: string,  required: true }   # Xcode scheme
+      bundle-id:     { type: string,  required: false }  # informational / Sparkle naming
+      project-path:  { type: string,  default: "." }     # dir holding the Tuist project
+      workspace:     { type: string,  default: "" }      # default: "<scheme>.xcworkspace"
+      cask-metadata: { type: string,  required: true }   # zamokctl cask json (repo-root-relative)
+      entitlements:  { type: string,  default: "" }      # repo-root-relative, optional
+      tap:           { type: string,  default: "bshk-app/homebrew-tap" }
+      asset-repo:    { type: string,  default: "bshk-app/homebrew-tap" }  # set to the app's own repo
+      provisioning-profile: { type: boolean, default: false }
+      sparkle:       { type: boolean, default: false }
+      version:       { type: string,  default: "" }      # override; else derived from the tag
+      build-flags:   { type: string,  default: "" }      # extra xcodebuild settings
+      runner:        { type: string,  default: "macos-latest" }  # GitHub-hosted (free for public) or a self-hosted label
+    secrets:
+      DEVELOPER_ID_P12:          { required: true }
+      DEVELOPER_ID_P12_PASSWORD: { required: true }
+      NOTARY_KEY_P8:             { required: true }
+      NOTARY_KEY_ID:             { required: true }
+      NOTARY_ISSUER:             { required: true }
+      TAP_GITHUB_TOKEN:          { required: true }
+      PROVISION_PROFILE:         { required: false }
+      SPARKLE_ED_PRIVATE_KEY:    { required: false }
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4        # checks out the CALLER repo at the triggering ref
+
+      - name: Import Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.DEVELOPER_ID_P12 }}
+          p12-password:    ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+
+      - name: Tooling (zamokctl + tuist)
+        run: brew install bshk-app/homebrew-tap/zamokctl tuist
+
+      - name: Resolve version + signing identity
+        id: vars
+        env:
+          VERSION_IN: ${{ inputs.version }}
+        run: |
+          VERSION="$VERSION_IN"
+          if [ -z "$VERSION" ]; then V="${GITHUB_REF_NAME#*-v}"; VERSION="${V#v}"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          SHA1="$(security find-identity -v -p codesigning | awk '/Developer ID Application/{print $2; exit}')"
+          [ -n "$SHA1" ] || { echo "no Developer ID Application identity in keychain" >&2; exit 1; }
+          echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
+
+      - name: Build (unsigned) -> sign -> notarize -> staple -> zip
+        env:
+          NOTARY_KEY_P8:     ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID:     ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER:     ${{ secrets.NOTARY_ISSUER }}
+          PROVISION_PROFILE: ${{ secrets.PROVISION_PROFILE }}
+          SCHEME:        ${{ inputs.scheme }}
+          PROJECT_PATH:  ${{ inputs.project-path }}
+          WORKSPACE_IN:  ${{ inputs.workspace }}
+          ENTITLEMENTS:  ${{ inputs.entitlements }}
+          PROVISIONING:  ${{ inputs.provisioning-profile }}
+          BUILD_FLAGS:   ${{ inputs.build-flags }}
+          SHA1:          ${{ steps.vars.outputs.sha1 }}
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          WS="$WORKSPACE_IN"; [ -n "$WS" ] || WS="$SCHEME.xcworkspace"
+          DD="$RUNNER_TEMP/dd"
+          # Build the app UNSIGNED — zamokctl re-signs with Developer ID (+ entitlements/profile).
+          ( cd "$PROJECT_PATH" \
+            && (tuist install || true) && tuist generate --no-open \
+            && xcodebuild -workspace "$WS" -scheme "$SCHEME" \
+                 -configuration Release -derivedDataPath "$DD" \
+                 -destination 'generic/platform=macOS' \
+                 CODE_SIGNING_ALLOWED=NO $BUILD_FLAGS build )
+          APP="$DD/Build/Products/Release/$SCHEME.app"
+          P8="$RUNNER_TEMP/notary.p8"; printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$P8"
+          OUT="$RUNNER_TEMP/dist"; mkdir -p "$OUT"
+          ARGS=( --input "$APP" --output-dir "$OUT" --format zip
+                 --signing-identity-sha1 "$SHA1"
+                 --notary-api-key "$P8" --notary-key-id "$NOTARY_KEY_ID" --notary-issuer "$NOTARY_ISSUER" )
+          if [ -n "$ENTITLEMENTS" ]; then ARGS+=( --entitlements "$ROOT/$ENTITLEMENTS" ); fi
+          if [ "$PROVISIONING" = "true" ]; then
+            PROF="$RUNNER_TEMP/app.provisionprofile"; printf '%s' "$PROVISION_PROFILE" | base64 --decode > "$PROF"
+            ARGS+=( --provisioning-profile "$PROF" )
+          fi
+          zamokctl package "${ARGS[@]}"
+
+      # Sparkle apps only. Server-side-appcast apps use sparkle: false.
+      - name: Update Sparkle appcast
+        if: ${{ inputs.sparkle }}
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          GITHUB_TOKEN:           ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          echo "TODO(murmur): generate_appcast over $RUNNER_TEMP/dist + push appcast/<token>.xml to the app repo."
+          echo "Wired when the first Sparkle app lands."
+
+      - name: Publish cask -> tap
+        env:
+          GITHUB_TOKEN:  ${{ secrets.TAP_GITHUB_TOKEN }}
+          CASK_METADATA: ${{ inputs.cask-metadata }}
+          ASSET_REPO:    ${{ inputs.asset-repo }}
+          TAP:           ${{ inputs.tap }}
+        run: |
+          set -euo pipefail
+          zamokctl cask --manifest "$RUNNER_TEMP/dist/manifest.json" \
+            --metadata "$CASK_METADATA" \
+            --store git-release --asset-repo "$ASSET_REPO" --tap "$TAP"
