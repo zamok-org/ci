@@ -95,6 +95,7 @@ jobs:
           PROVISIONING:  ${{ inputs.provisioning-profile }}
           BUILD_FLAGS:   ${{ inputs.build-flags }}
           SHA1:          ${{ steps.vars.outputs.sha1 }}
+          APP_VERSION:   ${{ steps.vars.outputs.version }}
         run: |
           set -euo pipefail
           ROOT="$PWD"
