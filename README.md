@@ -116,7 +116,7 @@ notary trio is an App Store Connect API key.
   "homepage": "https://github.com/<owner>/<app>",
   "autoUpdates": true,
   "appBundle": "<App>.app",
-  "dependsOnMacOS": ">= :sequoia",
+  "dependsOnMacOS": true,
   "livecheck": true,
   "livecheckUrl": "https://raw.githubusercontent.com/<owner>/<app>/main/appcast.xml",
   "zapTrash": ["~/Library/Application Support/<App>", "~/Library/Caches/app.<owner>.<app>"]
